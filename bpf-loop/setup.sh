@@ -43,7 +43,9 @@ if [ ! -f "$patch_file" ]; then
 fi
 
 if patch -p1 --forward --dry-run <"$patch_file" >/dev/null 2>&1; then
-	patch -p1 --forward <"$patch_file"
+	# --no-backup-if-mismatch 与 -V none 一起用：补丁带行偏移时
+	# patch 默认会写 .orig 副本，留在内核树里既污染源码也干扰后续步骤。
+	patch -p1 --forward --no-backup-if-mismatch -V none <"$patch_file"
 	echo "bpf-loop: applied."
 elif patch -p1 --reverse --dry-run <"$patch_file" >/dev/null 2>&1; then
 	echo "bpf-loop: already applied."
@@ -51,6 +53,9 @@ else
 	echo '[ERROR] bpf-loop: patch does not apply cleanly and is not already applied.'
 	exit 1
 fi
+
+# 兜底：清掉任何残留的 .orig（例如补丁以其他方式应用过）
+find include kernel tools -name '*.orig' -newermt '-5 minutes' -delete 2>/dev/null || true
 
 # Verify the id landed where dae expects it.
 if ! grep -q "	FN(loop),			\\\\" include/uapi/linux/bpf.h; then
