@@ -2871,6 +2871,49 @@ jobs:
       - name: 备份基准 defconfig
         run: cp "$DEFCONFIG" "$DEFCONFIG.orig"
 
+      - name: 回填 bpf_loop 助手 (5.15 dae/honk 支持)
+        # dae/honk/doona 的 eBPF 数据面调用 bpf_loop()，该助手在 mainline v5.17 才引入。
+        # ACK 5.15 已有回调型校验基础设施（bpf_for_each_map_elem / bpf_timer_set_callback），
+        # 但缺少 bpf_loop，因此加载 dae 程序会报：call unknown#181 / invalid func unknown#181。
+        # 助手 id 必须落在 181：dae_bpf_headers 的 bpf_helper_defs.h 把它硬编码为 181，
+        # 故补丁按主线顺序占位 176..181。仅支持 5.15。
+        if: ${{ inputs.kernel_version == '5.15' }}
+        working-directory: ${{ env.KERNEL_ROOT }}
+        env:
+          ABK_BPF_LOOP_PATCH_DIR: ${{ github.workspace }}/bpf-loop
+        run: |
+          set -euo pipefail
+          sh "$ABK_BPF_LOOP_PATCH_DIR/setup.sh"
+
+      - name: 补齐 dae/honk 所需内核配置 (5.15)
+        # dae 官方配置要求中，GKI defconfig 默认未开启的只有 BPF_STREAM_PARSER。
+        # 其余（BPF_SYSCALL / BPF_JIT / CGROUP_BPF / KPROBES / KPROBE_EVENTS / BPF_EVENTS /
+        # NET_INGRESS / NET_EGRESS / NET_SCH_INGRESS / NET_CLS_BPF / NET_CLS_ACT /
+        # DEBUG_INFO / DEBUG_INFO_BTF）GKI 已自带，此处只做确认不覆盖。
+        #
+        # 只改 $DEFCONFIG，不动 $DEFCONFIG.orig：bazel 路径靠
+        # `diff "$DEFCONFIG.orig" "$DEFCONFIG"` 提取 ksu.fragment，
+        # 若两份都写则 diff 为空、配置静默丢失。
+        if: ${{ inputs.kernel_version == '5.15' }}
+        run: |
+          set -euo pipefail
+
+          if ! grep -q '^CONFIG_BPF_STREAM_PARSER=y$' "$DEFCONFIG"; then
+            sed -i '/^# CONFIG_BPF_STREAM_PARSER is not set$/d' "$DEFCONFIG"
+            echo 'CONFIG_BPF_STREAM_PARSER=y' >> "$DEFCONFIG"
+            echo "已追加 CONFIG_BPF_STREAM_PARSER=y 到 $DEFCONFIG"
+          else
+            echo "CONFIG_BPF_STREAM_PARSER=y 已存在，跳过。"
+          fi
+
+          echo "### dae/honk 内核配置核对" >> "$GITHUB_STEP_SUMMARY"
+          for sym in BPF BPF_SYSCALL BPF_JIT CGROUPS CGROUP_BPF KPROBES KPROBE_EVENTS \
+                     BPF_EVENTS NET_INGRESS NET_EGRESS NET_SCH_INGRESS NET_CLS_BPF \
+                     NET_CLS_ACT BPF_STREAM_PARSER DEBUG_INFO DEBUG_INFO_BTF; do
+            line="$(grep -E "^CONFIG_${sym}=|^# CONFIG_${sym} is not set" "$DEFCONFIG" | head -1)"
+            printf -- '- `%s` -> %s\n' "$sym" "${line:-未设置}" >> "$GITHUB_STEP_SUMMARY"
+          done
+
       - name: 应用 NTsync 补丁
         if: ${{ inputs.use_ntsync }}
         env:
