@@ -2885,37 +2885,40 @@ jobs:
           set -euo pipefail
           sh "$ABK_BPF_LOOP_PATCH_DIR/setup.sh"
 
-      - name: 补齐 dae/honk 所需内核配置 (5.15)
-        # dae 官方配置要求中，GKI defconfig 默认未开启的只有 BPF_STREAM_PARSER。
-        # 其余（BPF_SYSCALL / BPF_JIT / CGROUP_BPF / KPROBES / KPROBE_EVENTS / BPF_EVENTS /
-        # NET_INGRESS / NET_EGRESS / NET_SCH_INGRESS / NET_CLS_BPF / NET_CLS_ACT /
-        # DEBUG_INFO / DEBUG_INFO_BTF）GKI 已自带，此处只做确认不覆盖。
+      - name: 核对 dae/honk 所需内核配置 (5.15, 只读)
+        # 这里**只读不写**：以下符号 GKI defconfig 已全部满足，无需改动。
         #
-        # 只改 $DEFCONFIG，不动 $DEFCONFIG.orig：bazel 路径靠
-        # `diff "$DEFCONFIG.orig" "$DEFCONFIG"` 提取 ksu.fragment，
-        # 若两份都写则 diff 为空、配置静默丢失。
+        # ⚠ 绝不可打开 CONFIG_BPF_STREAM_PARSER。
+        # 它会把 `struct strparser strp`（312 字节）加入 include/linux/skmsg.h 的
+        # struct sk_psock，使该结构体偏移整体后移 312 字节：
+        #     ABI 参考 android/abi_gki_aarch64.xml 锁 sk_psock 为 3072 bits，
+        #     且 ingress_skb 位于 576 bits(72B)；开启后实测 ingress_skb 落在 384B。
+        # 由于 ABK 会删掉 build.config.gki.aarch64 的 KMI_SYMBOL_LIST_STRICT_MODE，
+        # 该破坏不会在构建期被发现，只会在加载按原 ABI 编译的 vendor 模块时出问题。
+        #
+        # dae 也不需要它：dae 只注册 AttachSkSKBStreamVerdict，而
+        # net/core/sock_map.c 里 BPF_SK_SKB_STREAM_VERDICT 这一 case **不在**
+        # `#if IS_ENABLED(CONFIG_BPF_STREAM_PARSER)` 内（只有 BPF_SK_SKB_STREAM_PARSER
+        # 才被门控）。实测在未开启该选项的内核上 attach STREAM_VERDICT 返回 OK。
         if: ${{ inputs.kernel_version == '5.15' }}
         run: |
           set -euo pipefail
 
-          if ! grep -q '^CONFIG_BPF_STREAM_PARSER=y$' "$DEFCONFIG"; then
-            sed -i '/^# CONFIG_BPF_STREAM_PARSER is not set$/d' "$DEFCONFIG"
-            echo 'CONFIG_BPF_STREAM_PARSER=y' >> "$DEFCONFIG"
-            echo "已追加 CONFIG_BPF_STREAM_PARSER=y 到 $DEFCONFIG"
-          else
-            echo "CONFIG_BPF_STREAM_PARSER=y 已存在，跳过。"
+          if grep -q '^CONFIG_BPF_STREAM_PARSER=y$' "$DEFCONFIG"; then
+            echo "::error::检测到 CONFIG_BPF_STREAM_PARSER=y —— 这会破坏 sk_psock ABI，请移除该行。"
+            exit 1
           fi
 
           # 摘要只做展示：defconfig 里没有的符号由 Kconfig 默认值提供，
           # grep 未命中必须是非致命的（set -e 下直接赋值会中断整个步骤）。
           {
-            echo "### dae/honk 内核配置核对"
+            echo "### dae/honk 内核配置核对（只读）"
             echo
             echo "| 符号 | gki_defconfig |"
             echo "| --- | --- |"
             for sym in BPF BPF_SYSCALL BPF_JIT CGROUPS CGROUP_BPF KPROBES KPROBE_EVENTS \
                        BPF_EVENTS NET_INGRESS NET_EGRESS NET_SCH_INGRESS NET_CLS_BPF \
-                       NET_CLS_ACT BPF_STREAM_PARSER DEBUG_INFO DEBUG_INFO_BTF; do
+                       NET_CLS_ACT DEBUG_INFO DEBUG_INFO_BTF; do
               line="$(grep -E "^CONFIG_${sym}=|^# CONFIG_${sym} is not set" "$DEFCONFIG" | head -1 || true)"
               printf -- '| `%s` | %s |\n' "$sym" "${line:-（未显式设置，由 Kconfig 默认值提供）}"
             done
